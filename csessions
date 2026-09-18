@@ -1,0 +1,827 @@
+#!/usr/bin/env python3
+"""Claude Code sessions from this Mac and remote hosts, in one interactive list.
+
+Usage: csessions        picker: click = preview, double-click / Enter = open
+       csessions -l     plain table (also used when output is piped)
+       -a               include completed sessions
+
+Keys:  ctrl-n new session   ctrl-r refresh now   esc quit
+       the [ + New session ] header is clickable
+"""
+import json, os, re, shlex, shutil, socket, subprocess, sys, tempfile, textwrap, threading, time, urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+CONFIG = os.path.expanduser(
+    os.environ.get("CSESSIONS_CONFIG", "~/.config/csessions/config.json"))
+DEFAULTS = {
+    "hosts": {"local": None},   # label -> ssh target, null meaning this machine
+    "prefixes": {},             # label -> text prepended to that host's titles
+    "refresh": 5,
+    "history_ttl": 180,
+    "preview_width": 40,
+    "terminal": "iTerm",
+    # optional keystroke sent after a session window opens, to hand it to a
+    # tiling tool: {"key_code": 17, "modifiers": ["control","option","command"]}
+    "tile_shortcut": None,
+}
+
+
+def config():
+    cfg = dict(DEFAULTS)
+    try:
+        with open(CONFIG) as f:
+            cfg.update(json.load(f))
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"csessions: ignoring {CONFIG}: {exc}", file=sys.stderr)
+    return cfg
+
+
+CFG = config()
+HOSTS = CFG["hosts"]
+TERMINAL = CFG["terminal"]
+SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+REFRESH = CFG["refresh"]
+SNAP = os.path.join(tempfile.gettempdir(), "csessions-rows.json")
+BUSY = SNAP + ".lock"
+PREFIX = CFG["prefixes"]
+HIST_TTL = CFG["history_ttl"]
+
+BAND = "\033[48;5;237m"
+R, B, DIM, REV = "\033[0m", "\033[1m", "\033[2m", "\033[7m"
+ORANGE, BLUE, GREY, CYAN = "\033[38;5;209m", "\033[38;5;75m", "\033[38;5;245m", "\033[36m"
+GREEN, YELLOW = "\033[38;5;71m", "\033[38;5;179m"
+
+
+def run(label, cmd, timeout=30):
+    """Run a shell command on a host through a login shell, return stdout."""
+    target = HOSTS[label]
+    argv = ["bash", "-lc", cmd] if target is None else SSH + [target, "bash -lc " + shlex.quote(cmd)]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout).stdout
+
+
+def account():
+    try:
+        with open(os.path.expanduser("~/.claude.json")) as f:
+            return json.load(f).get("oauthAccount", {}).get("emailAddress", "") or os.getlogin()
+    except Exception:
+        return os.getlogin()
+
+
+def fetch(label, flags):
+    try:
+        out = run(label, f"claude agents {flags}")
+        rows = [dict(s, host=label) for s in json.loads(out[out.index("["):])]
+        st = live_state(label)
+        return [dict(s, rc=st.get(s.get("sessionId", ""), (False, 0))[0],
+                     last=st.get(s.get("sessionId", ""), (False, 0))[1] or s.get("startedAt", 0))
+                for s in rows]
+    except Exception as e:  # unreachable host must not hide the others
+        print(f"! {label}: {type(e).__name__}", file=sys.stderr)
+        return []
+
+
+# Each live claude process writes ~/.claude/sessions/<pid>.json; a string
+# bridgeSessionId there means the session is attached to Remote Control.
+# The file outlives a hard kill, so the pid must still be alive to count.
+RC_PROBE = r'''python3 -c "
+import json,glob,os
+for f in glob.glob(os.path.expanduser(chr(126)+'/.claude/sessions/*.json')):
+    try: d=json.load(open(f))
+    except Exception: continue
+    p=d.get('pid'); sid=d.get('sessionId')
+    if not p or not sid: continue
+    try: os.kill(int(p),0)
+    except Exception: continue
+    rc='1' if isinstance(d.get('bridgeSessionId'),str) else '0'
+    print(chr(9).join([sid,rc,str(d.get('updatedAt') or d.get('startedAt') or 0)]))"'''
+
+
+# Closed sessions leave no daemon record, only a transcript. Name comes from the
+# last custom-title/ai-title line; mtime is when it was last touched.
+HISTORY_PROBE = r'''python3 -c "
+import json,glob,os
+for f in glob.glob(os.path.expanduser(chr(126)+'/.claude/projects/*/*.jsonl')):
+    sid=os.path.basename(f)[:-6]; name=''; cwd=''
+    try:
+        for line in open(f,errors='ignore'):
+            if 'title' not in line and 'cwd' not in line: continue
+            try: d=json.loads(line)
+            except Exception: continue
+            name=d.get('customTitle') or d.get('aiTitle') or name
+            cwd=d.get('cwd') or cwd
+    except Exception: continue
+    print(chr(9).join([sid,str(int(os.path.getmtime(f)*1000)),name,cwd]))"'''
+
+
+def history(label):
+    """Closed sessions this host still has transcripts for (cached: the scan
+    walks every transcript on the host and costs seconds, the 5s refresh cannot
+    pay that). Closed sessions do not change often, so a stale few minutes is fine."""
+    cache = os.path.join(tempfile.gettempdir(), f"csessions-history-{label}.json")
+    try:
+        if time.time() - os.path.getmtime(cache) < HIST_TTL:
+            with open(cache) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    out = []
+    try:
+        for l in run(label, HISTORY_PROBE, timeout=40).splitlines():
+            p = l.split("\t")
+            if len(p) == 4 and p[0]:
+                out.append({"sessionId": p[0], "startedAt": int(p[1]), "last": int(p[1]),
+                            "name": p[2] or None, "cwd": p[3] or "~", "host": label,
+                            "kind": "closed", "state": "-"})
+    except Exception:
+        pass
+    try:
+        with open(cache, "w") as f:
+            json.dump(out, f)
+    except Exception:
+        pass
+    return out
+
+
+def live_state(label):
+    """sessionId -> (remote-controlled, last-activity ms) for this host's live sessions."""
+    got = {}
+    try:
+        for l in run(label, RC_PROBE, timeout=15).splitlines():
+            f = l.split("\t")
+            if len(f) == 3 and f[0]:
+                got[f[0]] = (f[1] == "1", int(f[2] or 0))
+    except Exception:
+        pass
+    return got
+
+
+def age(ms):
+    m = int(time.time() - ms / 1000) // 60
+    return f"{m}m" if m < 60 else f"{m // 60}h" if m < 2880 else f"{m // 1440}d"
+
+
+def md(text, width):
+    """Render a useful subset of markdown to ANSI: headings, bullets, code, emphasis."""
+    out, fence = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fence = not fence
+            out.append(f"{GREY}{'─' * min(width, 30)}{R}")
+            continue
+        if fence:
+            out.append(f"{GREY}  {line}{R}")
+            continue
+        s = line.rstrip()
+        for mark, code in (("**", B), ("`", GREY)):  # paired inline marks, longest first
+            parts = s.split(mark)
+            if len(parts) > 2:
+                s = "".join(p if n % 2 == 0 else f"{code}{p}{R}" for n, p in enumerate(parts))
+        if s.startswith("#"):
+            s = f"{B}{CYAN}{s.lstrip('#').strip()}{R}"
+        elif s.lstrip().startswith(("- ", "* ")):
+            i = len(s) - len(s.lstrip())
+            s = f"{' ' * i}{ORANGE}•{R} {s.lstrip()[2:]}"
+        out.append(s)
+    return "\n".join(out)
+
+
+# A transcript turn is not just what someone typed: slash commands, their output,
+# caveats and system reminders are all injected as "user" text. Shown raw they
+# drown the actual conversation, so each is either relabelled or dropped.
+DROP = re.compile(r"<(system-reminder|local-command-caveat|command-message|command-args)>"
+                  r".*?</\1>\s*", re.S)
+CMD = re.compile(r"<command-name>\s*(.*?)\s*</command-name>\s*", re.S)
+STDOUT = re.compile(r"<local-command-stdout>\s*(.*?)\s*</local-command-stdout>\s*", re.S)
+
+
+def clean_turn(text):
+    """Return (chips, body). Chips are slash commands run this turn."""
+    chips = [c.strip() for c in CMD.findall(text) if c.strip()]
+    outs = [o.strip() for o in STDOUT.findall(text) if o.strip()]
+    body = STDOUT.sub("", CMD.sub("", DROP.sub("", text))).strip()
+    if outs and not body:
+        body = outs[0]
+    return chips, body
+
+
+def rule(width, label=""):
+    if not label:
+        return f"{GREY}{'─' * width}{R}"
+    return f"{GREY}{'─' * 2}{R} {label} {GREY}{'─' * max(0, width - len(label) - 4)}{R}"
+
+
+def preview(host, kind, state, sid, cwd, name="-"):
+    if kind == "heading":
+        print(f"{DIM}Sessions last active {name}.{R}")
+        return
+    width = max(20, int(os.environ.get("FZF_PREVIEW_COLUMNS", 60)) - 1)
+    where = "this Mac" if host == "mac" else host
+    # fzf cannot bind a click inside the preview pane, so the key is the button
+    close = f"{GREY}ESC{R} {DIM}or{R} {GREY}←{R} {DIM}to close{R}"
+    # sits above the title, hard left: fzf paints its own scroll indicator in
+    # the preview's top-right corner and would overwrite anything placed there
+    print(close)
+    shown = name if len(name) <= width else name[:max(1, width - 1)] + "…"
+    print(f"{B}{shown}{R}")
+    print(f"{DIM}{state} {kind} on {where}{R}")
+    print(f"{GREY}{cwd}{R}")
+    print(f"{GREY}{sid[:8]}{R}")
+    # transcript lives under a sanitized-cwd dir, glob avoids re-deriving that name
+    out = run(host, f"tail -n 120 ~/.claude/projects/*/{shlex.quote(sid)}.jsonl")
+    msgs = []
+    for line in out.splitlines():
+        try:
+            d = json.loads(line)
+            c = d["message"]["content"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if isinstance(c, list):
+            c = "\n".join(b.get("text", "") for b in c
+                          if isinstance(b, dict) and b.get("type") == "text")
+        # isMeta marks text the harness injected (skill bodies, command output
+        # preambles) rather than anything a person or Claude actually said
+        if d.get("isMeta") or d.get("isSidechain"):
+            continue
+        if d.get("type") not in ("user", "assistant") or not c.strip():
+            continue
+        chips, body = clean_turn(c)
+        if chips or body:
+            msgs.append((d["type"], chips, body))
+    if not msgs:
+        print(f"\n{rule(width)}\n{DIM}Nothing said in this session yet.{R}")
+        return
+    for who, chips, body in msgs[-5:]:
+        you = who == "user"
+        tint, label = (BLUE, "you") if you else (ORANGE, "claude")
+        print()
+        print(rule(width, f"{B}{tint}{label}{R}"))
+        for c in chips:
+            t = f"❯ {c}"
+            print(f"{BAND}{B}{t}{R}{BAND}{' ' * max(0, width - len(t))}{R}")
+        if not body:
+            continue
+        if you:   # wrap ourselves so the quote bar runs down every line
+            lines = []
+            for para in body.splitlines():
+                lines += textwrap.wrap(para, max(10, width - 2)) or [""]
+        else:
+            lines = md(body, width).splitlines()
+        cap = 6 if you else 10
+        for i, l in enumerate(lines[:cap]):
+            if you:
+                t = ("❯ " if i == 0 else "  ") + l
+                print(f"{BAND}{t}{' ' * max(0, width - len(t))}{R}")
+            else:
+                print(l)
+        if len(lines) > cap:
+            print(f"{GREY}  +{len(lines) - cap} more lines{R}")
+
+
+def open_session(host, kind, state, sid, cwd):
+    if kind == "heading":       # a group label, nothing to open
+        return
+    # background sessions stay registered even once done, and --resume refuses
+    # them outright ("Run `claude attach <id>`"), so they always attach
+    if kind == "background":
+        cmd = f"claude attach {shlex.quote(sid[:8])}"
+    else:
+        cmd = f"cd {shlex.quote(cwd)} && claude --resume {shlex.quote(sid)}"
+    in_new_window(host, cmd)
+    tile_windows(2.5)
+
+
+def exec_on(host, cmd):
+    """Replace this process with cmd, so it takes over the current window."""
+    target = HOSTS[host]
+    argv = ["bash", "-lc", cmd] if target is None else ["ssh", "-t", target, "bash -lc " + shlex.quote(cmd)]
+    os.execvp(argv[0], argv)
+
+
+def as_applescript(s):
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def in_new_window(host, cmd):
+    """Run cmd in a fresh terminal window, leaving this picker running."""
+    target = HOSTS[host]
+    full = cmd if target is None else f"ssh -t {target} {shlex.quote('bash -lc ' + shlex.quote(cmd))}"
+    # hold the window open on failure, otherwise it vanishes before the error is readable
+    full += '; ec=$?; [ $ec -ne 0 ] && { echo; echo "[exited $ec] press any key"; read -n 1 -s; }'
+    inner = f"/bin/bash -lc {shlex.quote(full)}"
+    subprocess.run(["osascript", "-e", f'''
+tell application "{TERMINAL}"
+\tcreate window with default profile command {as_applescript(inner)}
+\tactivate
+end tell'''], capture_output=True)
+
+
+def pick_one(menu, prompt, header, nth="1,2"):
+    return subprocess.run(
+        ["fzf", "--delimiter=\t", f"--with-nth={nth}", "--no-sort", "--reverse", "--ansi",
+         "--height=~14", "--pointer=→", "--highlight-line", "--border=rounded",
+         f"--prompt={prompt}", f"--header={header}"],
+        input=menu, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+
+def new_session(rows):
+    """Ask which host, then which directory, then start a Remote Control session.
+    Runs inside the freshly opened window, so the picker is never taken over."""
+    menu = "\n".join(f"{h}\t{'this Mac' if t is None else t}" for h, t in HOSTS.items())
+    pick = pick_one(menu, "work where? ", "start a new Remote Control session on:")
+    if not pick:
+        return
+    host = pick.split("\t")[0]
+    # history is per-directory, so offer the dirs this host actually has sessions in
+    seen, dirs = set(), []
+    for s in rows:
+        c = s.get("cwd")
+        if s.get("host") == host and c and c not in seen:
+            seen.add(c)
+            dirs.append(c)
+    home = "~" if host != "mac" else os.path.expanduser("~")
+    if home not in seen:
+        dirs.append(home)
+    menu = "\n".join(f"{c}\t{sum(1 for s in rows if s.get('cwd') == c and s.get('host') == host)} sessions"
+                     for c in dirs)
+    pick = pick_one(menu, "which folder? ", f"new session on {host} — pick a working directory:")
+    if not pick:
+        return
+    cwd = pick.split("\t")[0]
+    tile_windows()   # grid it before exec replaces this process
+    # --remote-control makes it reachable from claude.ai/code and the mobile app
+    exec_on(host, f"cd {shlex.quote(cwd)} && claude --remote-control")
+
+
+def tile_windows(delay=1.5):
+    """Hand a freshly opened window to a tiling tool, if tile_shortcut is set.
+    Off by default: it types a keystroke, which needs Accessibility permission
+    for the terminal. A refusal is reported, never fatal."""
+    shortcut = CFG.get("tile_shortcut")
+    if not shortcut:
+        return
+    mods = ", ".join(f"{m} down" for m in shortcut.get("modifiers", []))
+    using = f" using {{{mods}}}" if mods else ""
+    time.sleep(delay)
+    r = subprocess.run(
+        ["osascript", "-e",
+         f'tell application "{TERMINAL}" to activate\n'
+         'delay 0.3\n'
+         f'tell application "System Events" to key code {int(shortcut["key_code"])}{using}'],
+        capture_output=True, text=True)
+    if r.returncode:
+        print(f"tile: {r.stderr.strip()[:120]}", file=sys.stderr)
+
+
+LOGO = [" ▐▛███▜▌", "▝▜█████▛▘", "  ▘▘ ▝▝"]
+
+
+def plan():
+    """Subscription tier, as shown on claude.ai."""
+    try:
+        with open(os.path.expanduser("~/.claude.json")) as f:
+            oa = json.load(f).get("oauthAccount", {})
+        t = (oa.get("userRateLimitTier") or oa.get("organizationRateLimitTier") or
+             oa.get("organizationType") or "")
+        for needle, label in (("max_20x", "Max 20x"), ("max_5x", "Max 5x"),
+                              ("max", "Max"), ("pro", "Pro"), ("team", "Team")):
+            if needle in t:
+                return label
+        return t or "unknown plan"
+    except Exception:
+        return "unknown plan"
+
+
+def version():
+    try:
+        out = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10).stdout
+        return out.split()[0] if out.strip() else "?"
+    except Exception:
+        return "?"
+
+
+RED, ORANGE2, LIME = "\033[38;5;203m", "\033[38;5;215m", "\033[38;5;149m"
+
+
+def usage_hue(p):
+    """Same ramp the statusline uses, so the two never disagree."""
+    return RED if p >= 95 else ORANGE2 if p >= 85 else YELLOW if p >= 70 else LIME if p >= 50 else GREEN
+
+
+def bar(pct, n=12):
+    fill = max(0, min(n, int(round(pct / 100 * n))))
+    hue = usage_hue(pct)
+    return f"{hue}{'█' * fill}{GREY}{'░' * (n - fill)}{R}", hue
+
+
+# USD per million tokens: input, output, cache write (5m), cache read.
+PRICES = {
+    "fable-5-1": (10.0, 50.0, 12.50, 0.25), "fable-5": (10.0, 50.0, 12.50, 1.00),
+    "opus-5": (5.0, 25.0, 6.25, 0.50), "opus-4-8": (5.0, 25.0, 6.25, 0.50),
+    "opus-4-7": (5.0, 25.0, 6.25, 0.50), "opus-4-6": (5.0, 25.0, 6.25, 0.50),
+    "sonnet-5": (2.0, 10.0, 2.50, 0.20), "sonnet-4-6": (3.0, 15.0, 3.75, 0.30),
+    "haiku-4-5": (1.0, 5.0, 1.25, 0.10),
+}
+DEFAULT_PRICE = PRICES["opus-5"]
+
+# Sum token usage per day from the transcripts. Only files touched in the last
+# 8 days are opened, which keeps this to a fraction of the full history scan.
+USAGE_PROBE = r'''python3 -c "
+import json,glob,os,time,calendar
+cut=time.time()-8*86400
+for f in glob.glob(os.path.expanduser(chr(126)+'/.claude/projects/*/*.jsonl')):
+    try:
+        if os.path.getmtime(f)<cut: continue
+    except Exception: continue
+    try:
+        for line in open(f,errors='ignore'):
+            if 'usage' not in line or 'assistant' not in line: continue
+            try: d=json.loads(line)
+            except Exception: continue
+            m=d.get('message') or {}
+            u=m.get('usage') or {}
+            if not u: continue
+            ts=d.get('timestamp') or ''
+            try: ep=calendar.timegm(time.strptime(ts[:19],'%Y-%m-%dT%H:%M:%S'))
+            except Exception: continue
+            print(chr(9).join([str(ep),str(m.get('model') or ''),
+                str(u.get('input_tokens') or 0),str(u.get('output_tokens') or 0),
+                str(u.get('cache_creation_input_tokens') or 0),
+                str(u.get('cache_read_input_tokens') or 0)]))
+    except Exception: continue"'''
+
+
+def spend(label):
+    """(day -> [tokens, usd]) for this host, cached like the history scan."""
+    cache = os.path.join(tempfile.gettempdir(), f"csessions-spend-{label}.json")
+    try:
+        if time.time() - os.path.getmtime(cache) < HIST_TTL:
+            with open(cache) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    days = {}
+    try:
+        for l in run(label, USAGE_PROBE, timeout=90).splitlines():
+            p = l.split("\t")
+            if len(p) != 6 or not p[0]:
+                continue
+            inp, out, cw, cr = (int(x or 0) for x in p[2:])
+            price = next((v for k, v in PRICES.items() if k in p[1]), DEFAULT_PRICE)
+            usd = (inp * price[0] + out * price[1] + cw * price[2] + cr * price[3]) / 1e6
+            day = time.strftime("%Y-%m-%d", time.localtime(int(p[0])))
+            d = days.setdefault(day, [0, 0.0])
+            d[0] += inp + out + cw + cr
+            d[1] += usd
+    except Exception:
+        pass
+    try:
+        with open(cache, "w") as f:
+            json.dump(days, f)
+    except Exception:
+        pass
+    return days
+
+
+def human(n):
+    for unit, size in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return str(int(n))
+
+
+def stats_rows():
+    days = {}
+    with ThreadPoolExecutor() as ex:
+        for got in ex.map(spend, HOSTS):
+            for k, v in got.items():
+                d = days.setdefault(k, [0, 0.0])
+                d[0] += v[0]
+                d[1] += v[1]
+    today = time.strftime("%Y-%m-%d")
+    week = [time.strftime("%Y-%m-%d", time.localtime(time.time() - i * 86400)) for i in range(7)]
+    rows = []
+    for tag, keys in (("today", [today]), ("7 days", week)):
+        tok = sum(days.get(k, [0, 0])[0] for k in keys)
+        usd = sum(days.get(k, [0, 0.0])[1] for k in keys)
+        plain = f"{tag:<7} {human(tok):>7} tok   ~${usd:,.0f}"
+        rows.append((plain, f"{DIM}{tag:<7}{R} {B}{human(tok):>7}{R}{DIM} tok   {R}"
+                            f"{GREEN}~${usd:,.0f}{R}"))
+    return rows
+
+
+def limits_line():
+    """5H / 7D usage. The payload only reaches a statusline, so statusline.py
+    caches it to ~/.claude/rate-limits.json and we read that."""
+    try:
+        with open(os.path.expanduser("~/.claude/rate-limits.json")) as f:
+            rl = json.load(f)
+    except Exception:
+        return "limits unavailable", f"{DIM}limits unavailable{R}"
+    rows = []
+    for key, tag in (("five_hour", "5H"), ("seven_day", "7D")):
+        d = rl.get(key)
+        if not d:
+            continue
+        pct = int(d.get("used_percentage") or 0)
+        left = int((d.get("resets_at") or 0) - time.time())
+        when = f"{left // 3600:02d}:{left % 3600 // 60:02d}" if 0 < left < 86400 else (
+            time.strftime("%b %-d %H:%M", time.localtime(d["resets_at"]))
+            if d.get("resets_at") else "")
+        g, hue = bar(pct)
+        plain = f"{tag} {'█' * 12} {pct:>3}%  {when}"
+        rows.append((plain, f"{DIM}{tag}{R} {g} {hue}{pct:>3}%{R}  {GREY}{when}{R}"))
+    return rows or [("limits unavailable", f"{DIM}limits unavailable{R}")]
+
+
+ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+def vlen(s):
+    """Width on screen, ignoring colour codes."""
+    return len(ANSI.sub("", s))
+
+
+def vcut(s, limit):
+    """Truncate to `limit` visible characters without slicing an escape in half."""
+    out, shown, i = [], 0, 0
+    while i < len(s) and shown < limit:
+        m = ANSI.match(s, i)
+        if m:
+            out.append(m.group())
+            i = m.end()
+            continue
+        out.append(s[i])
+        shown += 1
+        i += 1
+    return "".join(out) + R
+
+
+def panel(width, sections):
+    """Framed box with an inset label per section, like the statusline."""
+    lines = []
+    for i, (label, rows) in enumerate(sections):
+        l, r = ("╭", "╮") if i == 0 else ("├", "┤")
+        lines.append(f"{ORANGE}{l}─ {B}{label}{R}{ORANGE} "
+                     f"{'─' * max(0, width - 5 - len(label))}{r}{R}")
+        for _plain, colored in rows:
+            room = width - 3
+            if vlen(colored) > room:              # never let content break the frame
+                colored = vcut(colored, room - 1) + f"{GREY}…{R}"
+            lines.append(f"{ORANGE}│{R} {colored}"
+                         f"{' ' * max(0, room - vlen(colored))}{ORANGE}│{R}")
+    lines.append(f"{ORANGE}╰{'─' * (width - 2)}╯{R}")
+    return lines
+
+
+# Column header. Every width here must match the row format in rows_to_lines:
+# status glyph sits under the blank, ◉ under the R of RC, then one space per gap.
+# One card per session, grouped by when it was last active. The card text
+# carries no colour of its own: fzf then paints the whole selected card orange
+# (fg+) and the rest white (fg), which embedded ANSI would override.
+HEADER_COLS = f"{DIM}  sessions, most recently active first{R}"
+
+
+def bucket(ms):
+    """Which day group a timestamp belongs to, in the viewer's own timezone."""
+    day = time.strftime("%Y-%m-%d", time.localtime(ms / 1000))
+    today = time.strftime("%Y-%m-%d")
+    yesterday = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+    if day == today:
+        return "today"
+    if day == yesterday:
+        return "yesterday"
+    if ms / 1000 > time.time() - 7 * 86400:
+        return "earlier this week"
+    return "older"
+
+
+def rows_to_lines(rows):
+    items, group = [], None
+    hostw = max([len(h) for h in HOSTS] + [4]) + 1
+    for s in rows:
+        st = s.get("state") or "-"
+        kind = s.get("kind") or "?"
+        # state is a glyph, not a colour, so it survives fzf recolouring the line
+        # a working session pulses: terminal blink animates continuously without
+        # the 5s refresh having to repaint. The escape ends before the title, so
+        # fzf can still recolour the title when the card is selected.
+        mark = "✳" if st == "working" else "◐" if st == "blocked" else "○"
+        rc = "  ✆ remote" if s.get("rc") else ""   # single-width: an emoji miscounts in fzf
+        title = s.get("name") or "untitled"
+        tag = PREFIX.get(s["host"], "")
+        if tag and not title.startswith(tag):
+            title = tag + title
+        when = s.get("last") or s.get("startedAt", 0)
+        seen = age(when)
+        facts = (f"{s['host']:<{hostw}}{kind:<13}{st:<10}{seen:>4} ago"
+                 f"     started {age(s.get('startedAt', 0))}{rc}")
+        card = f"{mark} {title}\n   {DIM}{facts}{R}"
+        b = bucket(when)
+        if b != group:
+            # a heading is its own item, otherwise fzf paints the selection bar
+            # down it as part of the card that follows
+            group = b
+            items.append("\t".join(
+                ["", "heading", "", "", "", b,
+                 f"{GREY}{b} {'─' * max(4, 52 - len(b))}{R}"]))
+        hidden = [s["host"], kind, st, s.get("sessionId") or "",
+                  s.get("cwd") or "~", (s.get("name") or "-").replace("\t", " ")]
+        items.append("\t".join(hidden + [card]))
+    return items
+
+
+def collect(flags):
+    with ThreadPoolExecutor() as ex:
+        rows = [s for b in ex.map(lambda h: fetch(h, flags), HOSTS) for s in b]
+        if "--all" in flags:  # closed sessions live only in their transcripts
+            live = {s.get("sessionId") for s in rows}
+            for b in ex.map(history, HOSTS):
+                rows += [s for s in b if s["sessionId"] not in live]
+    # an untitled transcript is a session that never went anywhere, so skip it
+    rows = [s for s in rows if (s.get("name") or "").strip() not in ("", "-")]
+    # most recently active first, so a session that just replied jumps to the top
+    rows.sort(key=lambda s: -(s.get("last") or s.get("startedAt", 0)))
+    return rows
+
+
+def snapshot(flags):
+    """Rows for a repaint: fresh if the snapshot aged out and nobody else is
+    already fetching, otherwise the last known good set."""
+    try:
+        fresh = time.time() - os.path.getmtime(SNAP) < REFRESH
+    except OSError:
+        fresh = False
+    if not fresh:
+        try:
+            fd = os.open(BUSY, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:
+            fd = None                      # another repaint is already fetching
+        if fd is not None:
+            try:
+                rows = collect(flags)
+                with open(SNAP, "w") as f:
+                    json.dump(rows, f)
+                return rows
+            finally:
+                os.close(fd)
+                try:
+                    os.remove(BUSY)
+                except OSError:
+                    pass
+    try:
+        with open(SNAP) as f:
+            return json.load(f)
+    except Exception:
+        return collect(flags)
+
+
+def ticker(port, key, flags):
+    """Push a reload into fzf every REFRESH seconds via its HTTP control port."""
+    me = shlex.quote(os.path.abspath(sys.argv[0]))
+    action = f"reload-sync({me} --lines {flags})".encode()
+    while True:
+        time.sleep(REFRESH)
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                f"http://127.0.0.1:{port}", data=action, headers={"x-api-key": key}), timeout=3)
+        except Exception:
+            return  # fzf is gone, so is the reason to tick
+
+
+def push(port, key, action):
+    """Send an action to a running fzf through its control port."""
+    if not port:
+        return
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{port}", data=action.encode(),
+            headers={"x-api-key": key}), timeout=3)
+    except Exception:
+        pass
+
+
+def main_new():
+    in_new_window("mac", f"{shlex.quote(os.path.abspath(sys.argv[0]))} --new")
+    tile_windows(2.5)
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] == ["--preview"]:
+        return preview(*args[1:7])
+    flags = "-a" if "-a" in args else ""
+    if args[:1] == ["--header-click"]:
+        if os.environ.get("FZF_CLICK_HEADER_LINE") == "13":
+            main_new()
+        return
+    if args[:1] == ["--spawn-new"]:   # open the questions in their own window
+        in_new_window("mac", f"{shlex.quote(os.path.abspath(sys.argv[0]))} --new")
+        return tile_windows(2.5)   # the picker outlives the spawn, so grid from here
+    if args[:1] == ["--new"]:
+        return new_session(collect("--json"))
+    if args[:1] == ["--open"]:
+        return open_session(*args[1:6])
+    if args[:1] == ["--lines"]:  # reload hook: emit the raw list, nothing else
+        print("\0".join(rows_to_lines(snapshot("--json --all" if flags else "--json"))), end="")
+        return
+    while picker(args, flags):   # sessions open in their own window; this one stays
+        pass
+
+
+def picker(args, flags):
+    """Draw the list once. Returns True to draw it again, False to quit."""
+    rows = collect("--json --all" if flags else "--json")
+    live = sum(1 for s in rows if s.get("state") in ("working", "blocked"))
+    rc_n = sum(1 for s in rows if s.get("rc"))
+    # sized for the narrower pane so the frame survives the preview opening
+    cols = shutil.get_terminal_size((100, 24)).columns
+    pane = max(34, int(cols * 0.60) - 2)          # list pane with the preview open
+    gutter = max(len(m) for m in LOGO + [f"v{version()}"]) + 2
+    width = max(34, min(pane - gutter - 5, 78))   # leaves room for the [X]
+    who, tier = account(), plan()
+    act = f"{len(rows)} sessions · {live} active · {rc_n} remote"
+    new_plain = "+ New session   (click, or ctrl-n)"
+    body = panel(width, [
+        ("ACCOUNT", [(f"◆ {who}", f"{ORANGE}◆{R} {who}"),
+                     (tier, f"{B}{YELLOW}{tier}{R}")]),
+        ("SESSIONS", [(act, f"{B}{len(rows)}{R}{DIM} sessions · {R}{GREEN}{live}{R}"
+                            f"{DIM} active · {R}{GREEN}{rc_n}{R}{DIM} remote{R}")]),
+        ("STATS", stats_rows()),
+        ("LIMITS", limits_line()),
+        ("NEW", [(new_plain, f"{B}{ORANGE}+ New session{R}   {DIM}(click, or ctrl-n){R}")]),
+    ])
+    mark = LOGO + [f"v{version()}"]          # logo beside the panel, version under it
+    gut = max(len(m) for m in mark) + 2
+    rows_out = [f"{ORANGE if i < len(LOGO) else GREY}{mark[i]}{R}{' ' * (gut - len(mark[i]))}{l}"
+                if i < len(mark) else f"{' ' * gut}{l}"
+                for i, l in enumerate(body)]
+    head = "\n".join(rows_out + ["", HEADER_COLS, " "])
+
+    lines = rows_to_lines(rows)
+    if "-l" in args or not sys.stdout.isatty():
+        print(head.split("\n")[-1], *(l.split("\t")[6] for l in lines), sep="\n")
+        return False
+
+    me = shlex.quote(os.path.abspath(sys.argv[0]))
+    # fzf's footer only spans the list pane once the preview opens, so the
+    # clickable control goes first and never gets truncated away
+    # a button here would sit far from the preview and show even with nothing
+    # open, so the footer only states the keys
+    footer = f"{DIM}enter opens    ctrl-n starts one    esc or ← closes the preview{R}"
+    sel = os.path.join(tempfile.gettempdir(), f"csessions-sel-{os.getpid()}")
+    PICK = f"execute-silent(: > {sel})+change-pointer(┃)+show-preview"
+    port, key = free_port(), os.urandom(8).hex()
+    os.environ["FZF_API_KEY"] = key
+    os.environ["CS_PORT"], os.environ["CS_SEL"] = str(port), sel
+    threading.Thread(target=ticker, args=(port, key, flags), daemon=True).start()
+    # click-header is the button; --listen lets the ticker push periodic reloads
+    pick = subprocess.run(
+        ["fzf", "--delimiter=\t", "--with-nth=7", "--read0", "--marker= ", "--marker-multi-line=   ", "--gap=1", "--gap-line= ", "--header=" + head, "--no-sort", "--reverse",
+         "--ansi", "--pointer=┃", "--prompt=search ",
+         "--color=header:regular,fg:252,fg+:209:bold,pointer:209,prompt:245,border:240,bg+:-1,gutter:-1",
+         "--border=rounded", "--info=inline-right", f"--listen={port}",
+         "--footer", footer, "--footer-border=none",
+         # NEW is handled after fzf exits: become() would inherit fzf's piped
+         # stdout, leaving the spawned session without a terminal
+         "--bind", f"ctrl-n:execute-silent({me} --spawn-new)",
+         # only the button row (header line 4) opens the new-session picker
+"--bind", f"click-header:execute-silent({me} --header-click)",
+         "--bind", f"ctrl-r:reload-sync({me} --lines {flags})",
+         # Preview stays shut until you pick a row. It is opened only by real
+         # input, never by `focus`: the 5s reload re-sorts rows, which moves the
+         # cursor and fires focus on its own.
+         # open in place: exiting fzf and relaunching it is what made the
+         # window blank out and look like a restart
+         "--bind", f"enter:execute-silent({me} --open {{1}} {{2}} {{3}} {{4}} {{5}})",
+         "--bind", f"double-click:execute-silent({me} --open {{1}} {{2}} {{3}} {{4}} {{5}})",
+         # picking a row arms selection: pointer appears, preview opens
+         "--bind", f"start:execute-silent(rm -f {sel})",
+         "--bind", f"left-click:{PICK}", "--bind", f"up:up+{PICK}",
+         "--bind", f"down:down+{PICK}", "--bind", f"ctrl-p:up+{PICK}",
+         "--bind", f"page-up:page-up+{PICK}", "--bind", f"page-down:page-down+{PICK}",
+         # esc drops back to browse mode (scroll freely, nothing highlighted);
+         # pressing it again with nothing selected quits
+         "--bind", f"left:execute-silent(rm -f {sel})+change-pointer( )+hide-preview",
+         "--bind", f'esc:transform:if [ -f {sel} ]; then '
+                   f'echo "execute-silent(rm -f {sel})+change-pointer( )+hide-preview"; '
+                   f'else echo abort; fi',
+         # scrolling is browsing, not picking, so it keeps its default move-only behaviour
+         "--preview", f"{me} --preview {{1}} {{2}} {{3}} {{4}} {{5}} {{6}}",
+         "--preview-window=hidden,right,40%,wrap,border-left"],
+        input="\0".join(lines), stdout=subprocess.PIPE, text=True).stdout
+    out = [l for l in pick.splitlines() if l.strip()]
+    if not out:
+        return False          # esc quits
+    return False
+
+
+if __name__ == "__main__":
+    main()

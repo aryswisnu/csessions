@@ -1,0 +1,14 @@
+{
+  "hosts": {
+    "local": null,
+    "work": "me@10.0.0.5"
+  },
+  "prefixes": {
+    "work": "Work - "
+  },
+  "refresh": 5,
+  "history_ttl": 180,
+  "preview_width": 40,
+  "terminal": "iTerm",
+  "tile_shortcut": null
+}
