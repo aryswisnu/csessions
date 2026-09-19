@@ -40,6 +40,8 @@ def config():
 
 CFG = config()
 HOSTS = CFG["hosts"]
+# whichever label the user gave this machine; a new window can only open here
+LOCAL = next((h for h, t in HOSTS.items() if t is None), "local")
 TERMINAL = CFG["terminal"]
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
 REFRESH = CFG["refresh"]
@@ -217,7 +219,7 @@ def preview(host, kind, state, sid, cwd, name="-"):
         print(f"{DIM}Sessions last active {name}.{R}")
         return
     width = max(20, int(os.environ.get("FZF_PREVIEW_COLUMNS", 60)) - 1)
-    where = "this Mac" if host == "mac" else host
+    where = "this Mac" if host == LOCAL else host
     # fzf cannot bind a click inside the preview pane, so the key is the button
     close = f"{GREY}ESC{R} {DIM}or{R} {GREY}←{R} {DIM}to close{R}"
     # sits above the title, hard left: fzf paints its own scroll indicator in
@@ -340,7 +342,7 @@ def new_session(rows):
         if s.get("host") == host and c and c not in seen:
             seen.add(c)
             dirs.append(c)
-    home = "~" if host != "mac" else os.path.expanduser("~")
+    home = os.path.expanduser("~") if HOSTS.get(host) is None else "~"
     if home not in seen:
         dirs.append(home)
     menu = "\n".join(f"{c}\t{sum(1 for s in rows if s.get('cwd') == c and s.get('host') == host)} sessions"
@@ -703,7 +705,7 @@ def push(port, key, action):
 
 
 def main_new():
-    in_new_window("mac", f"{shlex.quote(os.path.abspath(sys.argv[0]))} --new")
+    in_new_window(LOCAL, f"{shlex.quote(os.path.abspath(sys.argv[0]))} --new")
     tile_windows(2.5)
 
 
@@ -723,7 +725,7 @@ def main():
             main_new()
         return
     if args[:1] == ["--spawn-new"]:   # open the questions in their own window
-        in_new_window("mac", f"{shlex.quote(os.path.abspath(sys.argv[0]))} --new")
+        in_new_window(LOCAL, f"{shlex.quote(os.path.abspath(sys.argv[0]))} --new")
         return tile_windows(2.5)   # the picker outlives the spawn, so grid from here
     if args[:1] == ["--new"]:
         return new_session(collect("--json"))
