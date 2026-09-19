@@ -23,14 +23,12 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-CAST, GIF = os.path.join(HERE, "csessions.cast"), os.path.join(HERE, "csessions.gif")
-COLS, ROWS = 146, 38
 
 DOWN, ESC, CR = "\x1b[B", "\x1b", "\r"
 
 # (wait this long first, then send this) -- timings are what the viewer reads at,
 # so they are generous: every pause is someone looking at the screen.
-SCRIPT = [
+BROWSE = [
     (5.0, DOWN),        # list has painted; select the first session
     (3.0, DOWN),        # preview is open, walk down it
     (3.5, DOWN),        # a session on the other host, driven from a phone
@@ -42,27 +40,47 @@ SCRIPT = [
     (1.5, None),        # final beat, then quit
 ]
 
+# The ctrl-n binding hands the questions to a brand new terminal window, which
+# cannot be filmed. `--new` asks them inline instead: same two pickers, same
+# code, and in the fixture the session it finally starts is the stub `claude`,
+# which exits immediately.
+NEW = [
+    (2.5, DOWN),        # host picker: this Mac, or the remote box
+    (2.0, CR),
+    (2.5, DOWN),        # then a working directory on that host
+    (2.0, CR),
+    (2.0, None),
+]
 
-def set_size(fd):
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+# (name, argv, script, cols, rows). The new-session pickers are a handful of
+# lines, so they get a short terminal: filling the frame natively beats
+# punching into a mostly empty one and upscaling the text.
+SCENES = [
+    ("browse", ["-a"], BROWSE, 146, 38),
+    ("new", ["--new"], NEW, 104, 12),
+]
 
 
-def record(fixture):
+def set_size(fd, cols, rows):
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
+def record(fixture, args, script, cast, cols, rows):
     master, slave = os.openpty()
-    set_size(slave)
+    set_size(slave, cols, rows)
     env = dict(os.environ,
                HOME=f"{fixture}/home-local",
                PATH=f"{fixture}/bin:" + os.environ["PATH"],
                CSESSIONS_CONFIG=f"{fixture}/config.json",
-               TERM="xterm-256color", LINES=str(ROWS), COLUMNS=str(COLS))
-    proc = subprocess.Popen([sys.executable, os.path.join(REPO, "csessions"), "-a"],
+               TERM="xterm-256color", LINES=str(rows), COLUMNS=str(cols))
+    proc = subprocess.Popen([sys.executable, os.path.join(REPO, "csessions")] + args,
                             stdin=slave, stdout=slave, stderr=slave,
                             env=env, cwd=REPO, start_new_session=True)
     os.close(slave)
 
     # absolute offsets, so a slow read never shifts every later keystroke
     sends, at = [], 0.0
-    for delay, keys in SCRIPT:
+    for delay, keys in script:
         at += delay
         if keys:
             sends.append((at, keys))
@@ -98,9 +116,9 @@ def record(fixture):
     proc.wait(timeout=5)
     os.close(master)
 
-    header = {"version": 2, "width": COLS, "height": ROWS,
+    header = {"version": 2, "width": cols, "height": rows,
               "timestamp": int(start), "env": {"TERM": "xterm-256color"}}
-    with open(CAST, "w") as f:
+    with open(cast, "w") as f:
         f.write(json.dumps(header) + "\n")
         for e in events:
             f.write(json.dumps(e) + "\n")
@@ -128,12 +146,15 @@ def main():
                 pass
 
     try:
-        n = record(fixture)
-        print(f"captured {n} output events")
-        subprocess.run(["agg", "--font-size", "16", "--fps-cap", "12",
-                        "--idle-time-limit", "2", "--theme", "asciinema",
-                        CAST, GIF], check=True)
-        print(f"wrote {GIF} ({os.path.getsize(GIF) / 1e6:.1f} MB)")
+        for name, args, script, cols, rows in SCENES:
+            cast = os.path.join(HERE, f"csessions-{name}.cast")
+            gif = os.path.join(HERE, f"csessions-{name}.gif")
+            n = record(fixture, args, script, cast, cols, rows)
+            subprocess.run(["agg", "--font-size", "16", "--fps-cap", "12",
+                            "--idle-time-limit", "2", "--theme", "asciinema",
+                            cast, gif], check=True)
+            print(f"{name}: {n} events -> {gif} "
+                  f"({os.path.getsize(gif) / 1e6:.1f} MB)")
     finally:
         try:
             with open(f"{fixture}/pids") as f:

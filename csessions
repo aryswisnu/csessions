@@ -347,7 +347,7 @@ def new_session(rows):
         dirs.append(home)
     menu = "\n".join(f"{c}\t{sum(1 for s in rows if s.get('cwd') == c and s.get('host') == host)} sessions"
                      for c in dirs)
-    pick = pick_one(menu, "which folder? ", f"new session on {host} — pick a working directory:")
+    pick = pick_one(menu, "which folder? ", f"new session on {host}: pick a working directory:")
     if not pick:
         return
     cwd = pick.split("\t")[0]

@@ -1,7 +1,7 @@
 # Demo recording
 
-`csessions.gif` in the README is recorded against invented data, not anyone's
-real machine.
+The clips in the README are recorded against invented data, not anyone's real
+machine.
 
 ```sh
 # one binary, no browser and no ffmpeg
@@ -40,16 +40,62 @@ a contributor changing the UI can re-record without exposing their own work.
 | | |
 |---|---|
 | `fixture.py` | builds `.fixture/`: two fake homes, stub `claude` and `ssh`, a config |
-| `record.py` | drives csessions in a pty, writes `csessions.cast`, renders the GIF |
-| `csessions.cast` | the raw [asciicast](https://docs.asciinema.org); re-render without recording |
+| `record.py` | drives csessions in a pty, writes a cast per scene, renders the GIFs |
+| `csessions-*.cast` | the raw [asciicasts](https://docs.asciinema.org); re-render without recording |
+| `video/` | the HyperFrames composition that turns the scenes into `csessions.mp4` |
 
 `.fixture/` is gitignored and disposable. It is rebuilt on every recording,
 because the list shows ages relative to now.
 
-To re-render the GIF from the existing cast, at a different size or theme:
+To re-render a GIF from an existing cast, at a different size or theme:
 
 ```sh
-agg --font-size 16 --fps-cap 12 --theme asciinema demo/csessions.cast demo/csessions.gif
+agg --font-size 16 --fps-cap 12 --theme asciinema \
+  demo/csessions-browse.cast demo/csessions-browse.gif
+```
+
+## The video
+
+`csessions.mp4` is the two scenes cut together with camera moves, built with
+[HyperFrames](https://hyperframes.heygen.com). The GIFs are the raw captures;
+the MP4 adds the framing.
+
+```sh
+cd demo/video
+npx hyperframes check && npx hyperframes render
+```
+
+It expects `assets/browse.mp4` and `assets/new.mp4`, which are not committed
+because they are derived. Rebuild them from the casts at the resolution the
+camera needs:
+
+```sh
+mkdir -p demo/video/assets
+for s in browse new; do
+  agg --font-size 28 --fps-cap 12 --idle-time-limit 2 --theme asciinema \
+    demo/csessions-$s.cast /tmp/$s.gif
+  # -g 30 matters: sparse keyframes make the renderer freeze on seek
+  ffmpeg -y -i /tmp/$s.gif -c:v libx264 -r 30 -g 30 -keyint_min 30 -crf 16 \
+    -pix_fmt yuv420p -movflags +faststart demo/video/assets/$s.mp4
+done
+```
+
+Two things the camera depends on:
+
+- **Font size 28, not 16.** The composition punches in to 1.5x; rendering the
+  source at roughly twice the display size means a punch-in reaches native
+  pixels instead of upscaling a small frame.
+- **The pan is clamped** to the scaled picture's own overhang, so a move can
+  never push the frame off its own edge and expose the background. A target
+  near a corner is approached rather than centred.
+
+Camera beats are cut to each capture's frame timestamps, which are not the
+same as the keystroke times in `record.py`: `agg --idle-time-limit 2` collapses
+every pause longer than two seconds. Read the real ones with:
+
+```sh
+ffprobe -v error -select_streams v -show_entries frame=pts_time \
+  -of csv=p=0 demo/csessions-browse.gif
 ```
 
 ## Editing the demo

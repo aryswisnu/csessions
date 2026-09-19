@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .DS_Store
 demo/.fixture/
+demo/video/assets/
+demo/video/renders/
+demo/video/node_modules/
+demo/video/.hyperframes/
