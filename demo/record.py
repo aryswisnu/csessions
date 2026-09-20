@@ -52,11 +52,12 @@ NEW = [
     (2.0, None),
 ]
 
-# (name, argv, script, cols, rows). The new-session pickers are a handful of
-# lines, so they get a short terminal: filling the frame natively beats
-# punching into a mostly empty one and upscaling the text.
+# (name, argv, script, cols, rows). Terminal size is a framing decision: the
+# video is watched on a phone, so a tighter terminal means bigger type before
+# the camera does anything. The new-session pickers are a handful of lines and
+# get a short one for the same reason.
 SCENES = [
-    ("browse", ["-a"], BROWSE, 146, 38),
+    ("browse", ["-a"], BROWSE, 132, 32),
     ("new", ["--new"], NEW, 104, 12),
 ]
 

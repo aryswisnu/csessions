@@ -2,14 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=1920, height=1180" />
+    <meta name="viewport" content="width=1280, height=736" />
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       html, body {
         margin: 0;
-        width: 1920px;
-        height: 1180px;
+        width: 1280px;
+        height: 736px;
         overflow: hidden;
         background: #101112;
       }
@@ -30,10 +30,10 @@
         justify-content: center;
         will-change: transform;
       }
-      #browse { width: 1920px; height: 1180px; display: block; }
+      #browse { width: 1280px; height: 736px; display: block; }
       /* The pickers were recorded in a short terminal, so they sit at their own
          size on the canvas rather than being blown up to fill it. */
-      #new { width: 1830px; height: 524px; display: block; border-radius: 10px; }
+      #new { width: 1240px; height: 355px; display: block; border-radius: 8px; }
     </style>
   </head>
   <body>
@@ -41,9 +41,9 @@
       id="root"
       data-composition-id="main"
       data-start="0"
-      data-duration="36.6"
-      data-width="1920"
-      data-height="1180"
+      data-duration="34.9"
+      data-width="1280"
+      data-height="736"
     >
       <div class="cam" id="cam-browse">
         <video
@@ -51,7 +51,8 @@
           class="clip"
           src="assets/browse.mp4"
           data-start="0"
-          data-duration="24.56"
+          data-media-start="2.25"
+          data-duration="22.9"
           data-track-index="0"
           muted
           playsinline
@@ -63,7 +64,7 @@
           id="new"
           class="clip"
           src="assets/new.mp4"
-          data-start="24.56"
+          data-start="22.9"
           data-duration="12"
           data-track-index="1"
           muted
@@ -73,18 +74,14 @@
     </div>
 
     <script>
-      const W = 1920, H = 1180;
+      const W = 1280, H = 736;
 
       // Bring the normalised source point (px, py) towards the centre of frame
       // at scale s. transform-origin stays at the centre for every move:
-      // tweening transform-origin itself would jump the picture the moment it
-      // changes.
+      // tweening transform-origin itself would jump the picture.
       //
-      // The pan is clamped to the scaled picture's own overhang, so the frame
-      // can never be pushed off its own edge and expose the background. A point
-      // near a corner is therefore approached rather than centred, which is
-      // what a real camera does too: the closer the target sits to the edge,
-      // the more you have to zoom to put it in the middle.
+      // The pan is clamped to the scaled picture's own overhang, so a move can
+      // never push the frame off its own edge and expose the background.
       const cam = (px, py, s) => {
         const maxX = (W * s - W) / 2, maxY = (H * s - H) / 2;
         const clamp = (v, m) => Math.max(-m, Math.min(m, v));
@@ -97,34 +94,41 @@
 
       const tl = gsap.timeline({ paused: true });
       const B = "#cam-browse", N = "#cam-new";
+      const E = "power2.inOut";
 
-      // --- scene 1: browsing, cut to beats in assets/browse.mp4 -------------
-      gsap.set(B, cam(0.5, 0.5, 1));
+      // The camera never returns to a full-frame wide shot after the opening:
+      // at this canvas size the whole terminal is below reading size, so a
+      // "neutral" wide is really just an unreadable one. It moves between
+      // places worth reading and then holds still. Every hold below is
+      // deliberate: a camera that is always drifting reads as mechanical.
+      //
+      // Source is 3216px wide shown across 1280, so scale 2.0 is still a
+      // downscale: punching in costs no sharpness here.
+      gsap.set(B, cam(0.42, 0.34, 1.30));
       gsap.set(N, { opacity: 0, ...cam(0.5, 0.5, 1) });
 
-      // 0.0-2.0  the list paints: hold wide, let the viewer read the shape
-      // 2.0-4.0  ease into the account / stats / limits panel
-      tl.to(B, { ...cam(0.34, 0.28, 1.45), duration: 2.0, ease: "power2.inOut" }, 2.0);
-      // 4.0-5.4  a session is selected and the preview opens: pull out to show both panes
-      tl.to(B, { ...cam(0.5, 0.5, 1.0), duration: 1.4, ease: "power2.inOut" }, 4.0);
-      // 5.4-13.5 walking the list: a slow drift towards the conversation pane
-      tl.to(B, { ...cam(0.74, 0.45, 1.28), duration: 8.1, ease: "none" }, 5.4);
-      // 13.5-15.4 preview closes: settle back to the whole screen
-      tl.to(B, { ...cam(0.5, 0.5, 1.0), duration: 1.9, ease: "power2.inOut" }, 13.5);
-      // 18.0-20.0 typing a search: push onto the query and what survives it
-      tl.to(B, { ...cam(0.20, 0.15, 1.50), duration: 2.0, ease: "power2.inOut" }, 18.0);
-      // 21.4-23.2 the match is selected: ease back out to finish the scene
-      tl.to(B, { ...cam(0.5, 0.45, 1.06), duration: 1.8, ease: "power2.inOut" }, 21.4);
+      // 0.0-0.8   the painted list, wide enough to read its shape
+      // 0.8-2.6   into the account / limits panel, then hold on it
+      tl.to(B, { ...cam(0.34, 0.30, 1.70), duration: 1.8, ease: E }, 0.35);
+      // 4.3-6.4   a session is selected: cross to the conversation, hold long
+      tl.to(B, { ...cam(0.74, 0.45, 1.80), duration: 2.1, ease: E }, 3.85);
+      // 11.6-13.6 back down to the cards as the selection walks the list
+      tl.to(B, { ...cam(0.32, 0.66, 1.70), duration: 2.0, ease: E }, 11.15);
+      // 15.3-17.2 wider for the search: the query and what survives it are at
+      //           opposite ends of the screen, so this beat needs both
+      tl.to(B, { ...cam(0.32, 0.42, 1.35), duration: 1.9, ease: E }, 14.85);
+      // 20.0-22.0 settle on the match to finish the scene
+      tl.to(B, { ...cam(0.45, 0.48, 1.55), duration: 2.0, ease: E }, 19.55);
 
       // --- the cut ----------------------------------------------------------
-      tl.to(B, { opacity: 0, duration: 0.35, ease: "power1.in" }, 24.25);
-      tl.to(N, { opacity: 1, duration: 0.35, ease: "power1.out" }, 24.45);
+      tl.to(B, { opacity: 0, duration: 0.3, ease: "power1.in" }, 22.65);
+      tl.to(N, { opacity: 1, duration: 0.3, ease: "power1.out" }, 22.8);
 
       // --- scene 2: starting a session --------------------------------------
-      // The pickers already fill the frame, so this is a drift, not a punch.
+      // The pickers already fill the frame, so this is one slow settle, not a
+      // punch: there is nothing here the viewer has to be pointed at.
       tl.fromTo(N, cam(0.5, 0.5, 1.0),
-                { ...cam(0.5, 0.5, 1.05), duration: 8.6, ease: "none" }, 24.8);
-      tl.to(N, { ...cam(0.5, 0.5, 1.0), duration: 2.2, ease: "power2.out" }, 33.6);
+                { ...cam(0.5, 0.5, 1.08), duration: 6.0, ease: E }, 23.15);
 
       window.__timelines["main"] = tl;
       tl.seek(0);

@@ -72,7 +72,7 @@ camera needs:
 ```sh
 mkdir -p demo/video/assets
 for s in browse new; do
-  agg --font-size 28 --fps-cap 12 --idle-time-limit 2 --theme asciinema \
+  agg --font-size 40 --fps-cap 12 --idle-time-limit 2 --theme asciinema \
     demo/csessions-$s.cast /tmp/$s.gif
   # -g 30 matters: sparse keyframes make the renderer freeze on seek
   ffmpeg -y -i /tmp/$s.gif -c:v libx264 -r 30 -g 30 -keyint_min 30 -crf 16 \
@@ -80,14 +80,18 @@ for s in browse new; do
 done
 ```
 
-Two things the camera depends on:
+Three things the camera depends on:
 
-- **Font size 28, not 16.** The composition punches in to 1.5x; rendering the
-  source at roughly twice the display size means a punch-in reaches native
-  pixels instead of upscaling a small frame.
+- **Font size 40, not 16.** The composition sits between 1.3x and 1.8x the
+  whole time, so the source is rendered at roughly 2.5x the display size and
+  every move is still a downscale rather than an upscale.
 - **The pan is clamped** to the scaled picture's own overhang, so a move can
   never push the frame off its own edge and expose the background. A target
   near a corner is approached rather than centred.
+- **The camera never goes back to a full-frame wide shot.** At 1280x736 the
+  whole terminal is below reading size, so a "neutral" wide is just an
+  unreadable one. It moves between places worth reading and then holds still;
+  a camera that drifts continuously reads as mechanical.
 
 Camera beats are cut to each capture's frame timestamps, which are not the
 same as the keystroke times in `record.py`: `agg --idle-time-limit 2` collapses
@@ -101,7 +105,7 @@ ffprobe -v error -select_streams v -show_entries frame=pts_time \
 ## Editing the demo
 
 Sessions, conversations and usage totals are the tables at the top of
-`fixture.py`. Keystrokes and timings are `SCRIPT` in `record.py`.
+`fixture.py`. Keystrokes, timings and each scene''s terminal size are the tables at the top of `record.py`. Terminal size is a framing decision: a tighter terminal means bigger type before the camera does anything.
 
 Three things to keep in mind:
 
