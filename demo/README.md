@@ -105,7 +105,9 @@ ffprobe -v error -select_streams v -show_entries frame=pts_time \
 ## Editing the demo
 
 Sessions, conversations and usage totals are the tables at the top of
-`fixture.py`. Keystrokes, timings and each scene''s terminal size are the tables at the top of `record.py`. Terminal size is a framing decision: a tighter terminal means bigger type before the camera does anything.
+`fixture.py`. Keystrokes, timings and each scene's terminal size are the tables
+at the top of `record.py`. Terminal size is a framing decision: a tighter
+terminal means bigger type before the camera does anything.
 
 Three things to keep in mind:
 
