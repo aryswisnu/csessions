@@ -146,6 +146,9 @@ def build_home(host, pids):
 
     for i, (_, sid, title, cwd, kind, state, rc, ago) in enumerate(mine):
         ts = NOW - ago
+        # the session the demo finally starts really does cd here, so the
+        # directory has to exist or bash prints an error over the last frame
+        os.makedirs(os.path.join(home, cwd.lstrip("~/")), exist_ok=True)
         slug = "-" + cwd.strip("~/").replace("/", "-")
 
         # transcript: the only record a closed session leaves behind

@@ -116,6 +116,8 @@ Three things to keep in mind:
   processes for this and `record.py` reaps them.
 - Don't send Enter on a session. That opens a real terminal window through
   AppleScript, which will not do what you want inside a recording.
+- The new-session scene stops on the directory choice. Letting it run on just
+  shows the stub `claude` starting and exiting, which is not the demo.
 - Usage totals live in their own untitled transcript, so that the stub turns
   padding them out never appear in a preview. An untitled session is skipped by
   the list but still counted by the usage probe.

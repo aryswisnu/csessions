@@ -41,7 +41,7 @@
       id="root"
       data-composition-id="main"
       data-start="0"
-      data-duration="34.9"
+      data-duration="32.4"
       data-width="1280"
       data-height="736"
     >
@@ -51,8 +51,8 @@
           class="clip"
           src="assets/browse.mp4"
           data-start="0"
-          data-media-start="2.25"
-          data-duration="22.9"
+          data-media-start="1.92"
+          data-duration="22.4"
           data-track-index="0"
           muted
           playsinline
@@ -64,8 +64,8 @@
           id="new"
           class="clip"
           src="assets/new.mp4"
-          data-start="22.9"
-          data-duration="12"
+          data-start="22.4"
+          data-duration="10"
           data-track-index="1"
           muted
           playsinline
@@ -109,26 +109,26 @@
 
       // 0.0-0.8   the painted list, wide enough to read its shape
       // 0.8-2.6   into the account / limits panel, then hold on it
-      tl.to(B, { ...cam(0.34, 0.30, 1.70), duration: 1.8, ease: E }, 0.35);
+      tl.to(B, { ...cam(0.34, 0.30, 1.70), duration: 1.8, ease: E }, 0.4);
       // 4.3-6.4   a session is selected: cross to the conversation, hold long
-      tl.to(B, { ...cam(0.74, 0.45, 1.80), duration: 2.1, ease: E }, 3.85);
+      tl.to(B, { ...cam(0.74, 0.45, 1.80), duration: 2.1, ease: E }, 3.6);
       // 11.6-13.6 back down to the cards as the selection walks the list
-      tl.to(B, { ...cam(0.32, 0.66, 1.70), duration: 2.0, ease: E }, 11.15);
+      tl.to(B, { ...cam(0.32, 0.66, 1.70), duration: 2.0, ease: E }, 10.9);
       // 15.3-17.2 wider for the search: the query and what survives it are at
       //           opposite ends of the screen, so this beat needs both
-      tl.to(B, { ...cam(0.32, 0.42, 1.35), duration: 1.9, ease: E }, 14.85);
+      tl.to(B, { ...cam(0.32, 0.42, 1.35), duration: 1.9, ease: E }, 14.6);
       // 20.0-22.0 settle on the match to finish the scene
-      tl.to(B, { ...cam(0.45, 0.48, 1.55), duration: 2.0, ease: E }, 19.55);
+      tl.to(B, { ...cam(0.45, 0.48, 1.55), duration: 2.0, ease: E }, 19.0);
 
       // --- the cut ----------------------------------------------------------
-      tl.to(B, { opacity: 0, duration: 0.3, ease: "power1.in" }, 22.65);
-      tl.to(N, { opacity: 1, duration: 0.3, ease: "power1.out" }, 22.8);
+      tl.to(B, { opacity: 0, duration: 0.3, ease: "power1.in" }, 22.15);
+      tl.to(N, { opacity: 1, duration: 0.3, ease: "power1.out" }, 22.3);
 
       // --- scene 2: starting a session --------------------------------------
       // The pickers already fill the frame, so this is one slow settle, not a
       // punch: there is nothing here the viewer has to be pointed at.
       tl.fromTo(N, cam(0.5, 0.5, 1.0),
-                { ...cam(0.5, 0.5, 1.08), duration: 6.0, ease: E }, 23.15);
+                { ...cam(0.5, 0.5, 1.08), duration: 6.0, ease: E }, 22.7);
 
       window.__timelines["main"] = tl;
       tl.seek(0);

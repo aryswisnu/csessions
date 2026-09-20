@@ -48,8 +48,7 @@ NEW = [
     (2.5, DOWN),        # host picker: this Mac, or the remote box
     (2.0, CR),
     (2.5, DOWN),        # then a working directory on that host
-    (2.0, CR),
-    (2.0, None),
+    (1.6, None),        # stop on the choice: what happens after is a session
 ]
 
 # (name, argv, script, cols, rows). Terminal size is a framing decision: the
