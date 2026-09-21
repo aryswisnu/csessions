@@ -8,7 +8,9 @@
   },
   "refresh": 5,
   "history_ttl": 180,
+  "usage_ttl": 30,
   "preview_width": 40,
   "terminal": "iTerm",
-  "tile_shortcut": null
+  "tile_shortcut": null,
+  "clipboard_port": null
 }

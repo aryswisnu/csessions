@@ -51,6 +51,16 @@ session window, to hand that window to a tiling tool.
 That is ctrl-opt-cmd-T. It needs Accessibility permission for your terminal. Off
 unless you set it.
 
+## clipboard-bridge/
+
+Makes pasting a screenshot into a session on another machine work, which it
+otherwise cannot: a remote host has no clipboard, and SSH forwards ports rather
+than pasteboards.
+
+**It lets the remote host read your Mac's clipboard while a session is open**,
+so read [clipboard-bridge/README.md](clipboard-bridge/README.md) before
+installing it.
+
 ## title-prefix-watcher.py
 
 **This writes to Claude Code's own files. Read this before running it.**

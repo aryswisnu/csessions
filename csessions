@@ -26,6 +26,9 @@ DEFAULTS = {
     # optional keystroke sent after a session window opens, to hand it to a
     # tiling tool: {"key_code": 17, "modifiers": ["control","option","command"]}
     "tile_shortcut": None,
+    # port of the clipboard bridge in extras/, reverse-forwarded into every
+    # remote session so a pasted image can follow you there. null disables it.
+    "clipboard_port": None,
 }
 
 
@@ -53,6 +56,21 @@ BUSY = SNAP + ".lock"
 PREFIX = CFG["prefixes"]
 HIST_TTL = CFG["history_ttl"]
 USAGE_TTL = CFG["usage_ttl"]
+CLIP_PORT = CFG["clipboard_port"]
+
+
+def clip_args():
+    """ssh flags that carry this machine's clipboard into a remote session.
+
+    Only interactive sessions get the tunnel: the probes have no use for it and
+    would open one every few seconds. A second session asking for a port the
+    first already holds warns and carries on, which is harmless but noisy, so
+    those warnings are quietened.
+    """
+    if not CLIP_PORT:
+        return []
+    return ["-o", "ExitOnForwardFailure=no", "-o", "LogLevel=ERROR",
+            "-R", f"{CLIP_PORT}:127.0.0.1:{CLIP_PORT}"]
 
 BAND = "\033[48;5;237m"
 R, B, DIM, REV = "\033[0m", "\033[1m", "\033[2m", "\033[7m"
@@ -310,7 +328,8 @@ def open_session(host, kind, state, sid, cwd):
 def exec_on(host, cmd):
     """Replace this process with cmd, so it takes over the current window."""
     target = HOSTS[host]
-    argv = ["bash", "-lc", cmd] if target is None else ["ssh", "-t", target, "bash -lc " + shlex.quote(cmd)]
+    argv = (["bash", "-lc", cmd] if target is None else
+            ["ssh", "-t"] + clip_args() + [target, "bash -lc " + shlex.quote(cmd)])
     os.execvp(argv[0], argv)
 
 
@@ -321,7 +340,9 @@ def as_applescript(s):
 def in_new_window(host, cmd):
     """Run cmd in a fresh terminal window, leaving this picker running."""
     target = HOSTS[host]
-    full = cmd if target is None else f"ssh -t {target} {shlex.quote('bash -lc ' + shlex.quote(cmd))}"
+    fwd = " ".join(shlex.quote(a) for a in clip_args())
+    full = cmd if target is None else (
+        f"ssh -t {fwd} {target} {shlex.quote('bash -lc ' + shlex.quote(cmd))}")
     # hold the window open on failure, otherwise it vanishes before the error is readable
     full += '; ec=$?; [ $ec -ne 0 ] && { echo; echo "[exited $ec] press any key"; read -n 1 -s; }'
     inner = f"/bin/bash -lc {shlex.quote(full)}"
