@@ -18,6 +18,9 @@ DEFAULTS = {
     "prefixes": {},             # label -> text prepended to that host's titles
     "refresh": 5,
     "history_ttl": 180,
+    # Usage is a much cheaper scan than the history one and it is the number
+    # that visibly moves while you work, so it gets its own shorter cache.
+    "usage_ttl": 30,
     "preview_width": 40,
     "terminal": "iTerm",
     # optional keystroke sent after a session window opens, to hand it to a
@@ -49,6 +52,7 @@ SNAP = os.path.join(tempfile.gettempdir(), "csessions-rows.json")
 BUSY = SNAP + ".lock"
 PREFIX = CFG["prefixes"]
 HIST_TTL = CFG["history_ttl"]
+USAGE_TTL = CFG["usage_ttl"]
 
 BAND = "\033[48;5;237m"
 R, B, DIM, REV = "\033[0m", "\033[1m", "\033[2m", "\033[7m"
@@ -438,10 +442,26 @@ DEFAULT_PRICE = PRICES["opus-5"]
 
 # Sum token usage per day from the transcripts. Only files touched in the last
 # 8 days are opened, which keeps this to a fraction of the full history scan.
+#
+# Walk rather than glob: a session's subagents keep their own transcripts a
+# level or two down (<project>/<session>/subagents/*.jsonl) and their turns are
+# real spend, so a top-level glob quietly undercounts every session that
+# delegated work.
+#
+# ssh-<uuid> projects are skipped for the same reason the history scan skips
+# them: they are another machine's sessions mirrored here, and counting them
+# bills this machine for work it did not do. The machine that ran them reports
+# them itself. One that is not a configured host goes uncounted, which is the
+# lesser error.
 USAGE_PROBE = r'''python3 -c "
-import json,glob,os,time,calendar
+import json,os,time,calendar
 cut=time.time()-8*86400
-for f in glob.glob(os.path.expanduser(chr(126)+'/.claude/projects/*/*.jsonl')):
+root=os.path.expanduser(chr(126)+'/.claude/projects')
+files=[]
+for base,dirs,names in os.walk(root):
+    dirs[:]=[d for d in dirs if not d.startswith('ssh-')]
+    files+=[os.path.join(base,n) for n in names if n.endswith('.jsonl')]
+for f in files:
     try:
         if os.path.getmtime(f)<cut: continue
     except Exception: continue
@@ -464,10 +484,10 @@ for f in glob.glob(os.path.expanduser(chr(126)+'/.claude/projects/*/*.jsonl')):
 
 
 def spend(label):
-    """(day -> [tokens, usd]) for this host, cached like the history scan."""
+    """(day -> [tokens, usd]) for this host, briefly cached."""
     cache = os.path.join(tempfile.gettempdir(), f"csessions-spend-{label}.json")
     try:
-        if time.time() - os.path.getmtime(cache) < HIST_TTL:
+        if time.time() - os.path.getmtime(cache) < USAGE_TTL:
             with open(cache) as f:
                 return json.load(f)
     except Exception:
