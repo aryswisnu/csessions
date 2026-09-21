@@ -504,15 +504,21 @@ for f in files:
     except Exception: continue"'''
 
 
-def spend(label):
-    """(day -> [tokens, usd]) for this host, briefly cached."""
+def spend(label, refresh=True):
+    """(day -> [tokens, usd]) for this host, briefly cached.
+
+    With refresh off, whatever the keeper last wrote is used and no scan runs.
+    The panel is rendered inside fzf's transform-header, which holds the
+    keyboard until it returns, so it must never be the thing that fetches.
+    """
     cache = os.path.join(tempfile.gettempdir(), f"csessions-spend-{label}.json")
     try:
-        if time.time() - os.path.getmtime(cache) < USAGE_TTL:
+        if refresh is False or time.time() - os.path.getmtime(cache) < USAGE_TTL:
             with open(cache) as f:
                 return json.load(f)
     except Exception:
-        pass
+        if not refresh:
+            return {}
     days = {}
     try:
         for l in run(label, USAGE_PROBE, timeout=90).splitlines():
@@ -543,10 +549,10 @@ def human(n):
     return str(int(n))
 
 
-def stats_rows():
+def stats_rows(refresh=True):
     days = {}
     with ThreadPoolExecutor() as ex:
-        for got in ex.map(spend, HOSTS):
+        for got in ex.map(lambda h: spend(h, refresh), HOSTS):
             for k, v in got.items():
                 d = days.setdefault(k, [0, 0.0])
                 d[0] += v[0]
@@ -698,9 +704,21 @@ def collect(flags):
     return rows
 
 
-def snapshot(flags):
-    """Rows for a repaint: fresh if the snapshot aged out and nobody else is
-    already fetching, otherwise the last known good set."""
+def snapshot(flags, refresh=True):
+    """Rows for a repaint.
+
+    With refresh off this only reads what the keeper process last wrote, which
+    costs a file read. That matters because a repaint runs inside fzf's
+    reload-sync, which holds the keyboard until it returns: fetching there made
+    typing stutter every few seconds. Only the first paint, before any snapshot
+    exists, is allowed to fetch.
+    """
+    if not refresh:
+        try:
+            with open(SNAP) as f:
+                return json.load(f)
+        except Exception:
+            pass
     try:
         fresh = time.time() - os.path.getmtime(SNAP) < REFRESH
     except OSError:
@@ -710,6 +728,15 @@ def snapshot(flags):
             fd = os.open(BUSY, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except OSError:
             fd = None                      # another repaint is already fetching
+            # A process killed mid-fetch leaves the lock behind, and nothing
+            # would ever clear it: the snapshot then never gets written and
+            # every repaint pays for a full fetch. No fetch takes this long.
+            try:
+                if time.time() - os.path.getmtime(BUSY) > max(60, REFRESH * 6):
+                    os.remove(BUSY)
+                    fd = os.open(BUSY, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except OSError:
+                pass
         if fd is not None:
             try:
                 rows = collect(flags)
@@ -727,6 +754,30 @@ def snapshot(flags):
             return json.load(f)
     except Exception:
         return collect(flags)
+
+
+def keeper(flags, parent):
+    """Refresh the snapshot in the background, for as long as the picker lives.
+
+    Fetching costs seconds against every host, so it happens here rather than
+    in anything the terminal is waiting on.
+    """
+    while True:
+        try:
+            os.kill(parent, 0)
+        except OSError:
+            return                     # the picker is gone
+        try:
+            for h in HOSTS:
+                spend(h)
+            rows = collect(flags)
+            tmp = f"{SNAP}.{os.getpid()}"
+            with open(tmp, "w") as f:  # write then rename, so a reader never
+                json.dump(rows, f)     # catches a half-written file
+            os.replace(tmp, SNAP)
+        except Exception:
+            pass
+        time.sleep(REFRESH)
 
 
 def ticker(port, key, flags):
@@ -783,17 +834,21 @@ def main():
         return new_session(collect("--json"))
     if args[:1] == ["--open"]:
         return open_session(*args[1:6])
+    if args[:1] == ["--keeper"]:
+        return keeper("--json --all" if flags else "--json", int(args[1]))
     if args[:1] == ["--panel"]:  # refresh hook: re-render the header panel
-        print(head_block(snapshot("--json --all" if flags else "--json")), end="")
+        print(head_block(snapshot("--json --all" if flags else "--json",
+                                  refresh=False), refresh=False), end="")
         return
     if args[:1] == ["--lines"]:  # reload hook: emit the raw list, nothing else
-        print("\0".join(rows_to_lines(snapshot("--json --all" if flags else "--json"))), end="")
+        print("\0".join(rows_to_lines(
+            snapshot("--json --all" if flags else "--json", refresh=False))), end="")
         return
     while picker(args, flags):   # sessions open in their own window; this one stays
         pass
 
 
-def head_block(rows):
+def head_block(rows, refresh=True):
     """The framed panel, the logo beside it, and the column header.
 
     Built from scratch on every call rather than once at startup: the numbers
@@ -819,7 +874,7 @@ def head_block(rows):
                      (tier, f"{B}{YELLOW}{tier}{R}")]),
         ("SESSIONS", [(act, f"{B}{len(rows)}{R}{DIM} sessions · {R}{GREEN}{live}{R}"
                             f"{DIM} active · {R}{GREEN}{rc_n}{R}{DIM} remote{R}")]),
-        ("STATS", stats_rows()),
+        ("STATS", stats_rows(refresh)),
         ("LIMITS", limits_line()),
         ("NEW", [(new_plain, f"{B}{ORANGE}+ New session{R}   {DIM}(click, or ctrl-n){R}")]),
     ])
@@ -854,6 +909,10 @@ def picker(args, flags):
     os.environ["CS_PORT"], os.environ["CS_SEL"] = str(port), sel
     os.environ["CS_COLS"] = str(shutil.get_terminal_size((100, 24)).columns)
     threading.Thread(target=ticker, args=(port, key, flags), daemon=True).start()
+    subprocess.Popen([os.path.abspath(sys.argv[0]), "--keeper", str(os.getpid())]
+                     + (["-a"] if flags else []),
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
     # click-header is the button; --listen lets the ticker push periodic reloads
     pick = subprocess.run(
         ["fzf", "--delimiter=\t", "--with-nth=7", "--read0", "--marker= ", "--marker-multi-line=   ", "--gap=1", "--gap-line= ", "--header=" + head, "--no-sort", "--reverse",
