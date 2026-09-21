@@ -711,7 +711,9 @@ def snapshot(flags):
 def ticker(port, key, flags):
     """Push a reload into fzf every REFRESH seconds via its HTTP control port."""
     me = shlex.quote(os.path.abspath(sys.argv[0]))
-    action = f"reload-sync({me} --lines {flags})".encode()
+    # the panel's numbers age too, so the tick refreshes it alongside the list
+    action = (f"reload-sync({me} --lines {flags})"
+              f"+transform-header({me} --panel {flags})").encode()
     while True:
         time.sleep(REFRESH)
         try:
@@ -760,6 +762,9 @@ def main():
         return new_session(collect("--json"))
     if args[:1] == ["--open"]:
         return open_session(*args[1:6])
+    if args[:1] == ["--panel"]:  # refresh hook: re-render the header panel
+        print(head_block(snapshot("--json --all" if flags else "--json")), end="")
+        return
     if args[:1] == ["--lines"]:  # reload hook: emit the raw list, nothing else
         print("\0".join(rows_to_lines(snapshot("--json --all" if flags else "--json"))), end="")
         return
@@ -767,13 +772,21 @@ def main():
         pass
 
 
-def picker(args, flags):
-    """Draw the list once. Returns True to draw it again, False to quit."""
-    rows = collect("--json --all" if flags else "--json")
+def head_block(rows):
+    """The framed panel, the logo beside it, and the column header.
+
+    Built from scratch on every call rather than once at startup: the numbers
+    in it (limits, spend, how many sessions are live) go stale while the window
+    sits open, and a panel that disagrees with the list underneath it is worse
+    than no panel.
+    """
     live = sum(1 for s in rows if s.get("state") in ("working", "blocked"))
     rc_n = sum(1 for s in rows if s.get("rc"))
-    # sized for the narrower pane so the frame survives the preview opening
-    cols = shutil.get_terminal_size((100, 24)).columns
+    # Sized for the narrower pane so the frame survives the preview opening.
+    # When this runs as fzf's transform-header child there is no tty to measure,
+    # so take fzf's own width, then the one recorded at launch, then a guess.
+    cols = int(os.environ.get("FZF_COLUMNS") or os.environ.get("CS_COLS") or 0) \
+        or shutil.get_terminal_size((100, 24)).columns
     pane = max(34, int(cols * 0.60) - 2)          # list pane with the preview open
     gutter = max(len(m) for m in LOGO + [f"v{version()}"]) + 2
     width = max(34, min(pane - gutter - 5, 78))   # leaves room for the [X]
@@ -794,7 +807,13 @@ def picker(args, flags):
     rows_out = [f"{ORANGE if i < len(LOGO) else GREY}{mark[i]}{R}{' ' * (gut - len(mark[i]))}{l}"
                 if i < len(mark) else f"{' ' * gut}{l}"
                 for i, l in enumerate(body)]
-    head = "\n".join(rows_out + ["", HEADER_COLS, " "])
+    return "\n".join(rows_out + ["", HEADER_COLS, " "])
+
+
+def picker(args, flags):
+    """Draw the list once. Returns True to draw it again, False to quit."""
+    rows = collect("--json --all" if flags else "--json")
+    head = head_block(rows)
 
     lines = rows_to_lines(rows)
     if "-l" in args or not sys.stdout.isatty():
@@ -812,6 +831,7 @@ def picker(args, flags):
     port, key = free_port(), os.urandom(8).hex()
     os.environ["FZF_API_KEY"] = key
     os.environ["CS_PORT"], os.environ["CS_SEL"] = str(port), sel
+    os.environ["CS_COLS"] = str(shutil.get_terminal_size((100, 24)).columns)
     threading.Thread(target=ticker, args=(port, key, flags), daemon=True).start()
     # click-header is the button; --listen lets the ticker push periodic reloads
     pick = subprocess.run(
