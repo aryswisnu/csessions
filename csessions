@@ -102,9 +102,18 @@ for f in glob.glob(os.path.expanduser(chr(126)+'/.claude/sessions/*.json')):
 
 # Closed sessions leave no daemon record, only a transcript. Name comes from the
 # last custom-title/ai-title line; mtime is when it was last touched.
+#
+# A project directory named ssh-<uuid> holds a session that ran on another
+# machine over Claude Code's own SSH support. The transcript is mirrored here
+# but its cwd is a path on that machine, and nothing in the file says which
+# machine. Treating one as local gets you a session resumed on the wrong host,
+# or a shell error from cd'ing a directory that only exists elsewhere. Skip
+# them: the machine they really ran on reports them itself, with a cwd that
+# works, as soon as it is a configured host.
 HISTORY_PROBE = r'''python3 -c "
 import json,glob,os
 for f in glob.glob(os.path.expanduser(chr(126)+'/.claude/projects/*/*.jsonl')):
+    if os.path.basename(os.path.dirname(f)).startswith('ssh-'): continue
     sid=os.path.basename(f)[:-6]; name=''; cwd=''
     try:
         for line in open(f,errors='ignore'):
