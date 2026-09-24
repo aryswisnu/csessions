@@ -569,22 +569,71 @@ def stats_rows(refresh=True):
     return rows
 
 
+# Age and contents of a host's rate-limit cache. Age rather than mtime, so a
+# clock that disagrees with this machine's cannot make an old file look new.
+LIMITS_PROBE = r'''python3 -c "
+import os,time
+f=os.path.expanduser(chr(126)+'/.claude/rate-limits.json')
+try: print(int(time.time()-os.path.getmtime(f)),open(f).read().strip(),sep=chr(9))
+except Exception: pass"'''
+
+
+def limits_file(label):
+    return os.path.join(tempfile.gettempdir(), f"csessions-limits-{label}.json")
+
+
+def fetch_limits(label):
+    """Copy a remote host's rate-limit cache here, stamped in this clock."""
+    try:
+        age, body = run(label, LIMITS_PROBE, timeout=15).strip().split("\t", 1)
+        with open(limits_file(label), "w") as f:
+            json.dump({"at": time.time() - int(age), "rl": json.loads(body)}, f)
+    except Exception:
+        pass
+
+
+def newest_limits():
+    """The most recently written rate limits from any host.
+
+    They are per account, not per machine, but each host only learns them
+    while a Claude session there draws its status line. Reading one machine
+    alone goes stale whenever the work happens on another.
+    """
+    found = []
+    for label, target in HOSTS.items():
+        try:
+            if target is None:
+                path = os.path.expanduser("~/.claude/rate-limits.json")
+                with open(path) as f:
+                    found.append((os.path.getmtime(path), json.load(f)))
+            else:
+                with open(limits_file(label)) as f:
+                    d = json.load(f)
+                found.append((d["at"], d["rl"]))
+        except Exception:
+            continue
+    return max(found, key=lambda t: t[0])[1] if found else None
+
+
 def limits_line():
     """5H / 7D usage. The payload only reaches a statusline, so statusline.py
-    caches it to ~/.claude/rate-limits.json and we read that."""
-    try:
-        with open(os.path.expanduser("~/.claude/rate-limits.json")) as f:
-            rl = json.load(f)
-    except Exception:
-        return "limits unavailable", f"{DIM}limits unavailable{R}"
+    caches it to ~/.claude/rate-limits.json and we read the newest one."""
+    rl = newest_limits()
+    if not rl:
+        return [("limits unavailable", f"{DIM}limits unavailable{R}")]
     rows = []
     for key, tag in (("five_hour", "5H"), ("seven_day", "7D")):
         d = rl.get(key)
         if not d:
             continue
-        pct = int(d.get("used_percentage") or 0)
         left = int((d.get("resets_at") or 0) - time.time())
-        when = f"{left // 3600:02d}:{left % 3600 // 60:02d}" if 0 < left < 86400 else (
+        if d.get("resets_at") and left <= 0:
+            # the window this number belongs to is over; the new one is unknown
+            plain = f"{tag} reset, no data since"
+            rows.append((plain, f"{DIM}{tag}{R} {GREY}reset, no data since{R}"))
+            continue
+        pct = int(d.get("used_percentage") or 0)
+        when = f"{left // 3600:02d}:{left % 3600 // 60:02d}" if left < 86400 else (
             time.strftime("%b %-d %H:%M", time.localtime(d["resets_at"]))
             if d.get("resets_at") else "")
         g, hue = bar(pct)
@@ -770,6 +819,8 @@ def keeper(flags, parent):
         try:
             for h in HOSTS:
                 spend(h)
+                if HOSTS[h] is not None:
+                    fetch_limits(h)
             rows = collect(flags)
             tmp = f"{SNAP}.{os.getpid()}"
             with open(tmp, "w") as f:  # write then rename, so a reader never
