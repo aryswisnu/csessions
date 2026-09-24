@@ -454,6 +454,7 @@ def bar(pct, n=12):
 # USD per million tokens: input, output, cache write (5m), cache read.
 PRICES = {
     "fable-5-1": (10.0, 50.0, 12.50, 0.25), "fable-5": (10.0, 50.0, 12.50, 1.00),
+    "opus-5-5": (4.0, 20.0, 5.00, 0.20),
     "opus-5": (5.0, 25.0, 6.25, 0.50), "opus-4-8": (5.0, 25.0, 6.25, 0.50),
     "opus-4-7": (5.0, 25.0, 6.25, 0.50), "opus-4-6": (5.0, 25.0, 6.25, 0.50),
     "sonnet-5": (2.0, 10.0, 2.50, 0.20), "sonnet-4-6": (3.0, 15.0, 3.75, 0.30),
@@ -462,7 +463,12 @@ PRICES = {
 DEFAULT_PRICE = PRICES["opus-5"]
 
 # Sum token usage per day from the transcripts. Only files touched in the last
-# 8 days are opened, which keeps this to a fraction of the full history scan.
+# 31 days are opened, which keeps this to a fraction of the full history scan.
+#
+# Claude Code writes an assistant message once per content block (thinking,
+# text, each tool call), and every copy repeats the message's usage. Summing
+# lines counted each message two to three times; the first copy of each
+# (message id, request id) is the only one kept.
 #
 # Walk rather than glob: a session's subagents keep their own transcripts a
 # level or two down (<project>/<session>/subagents/*.jsonl) and their turns are
@@ -476,7 +482,8 @@ DEFAULT_PRICE = PRICES["opus-5"]
 # lesser error.
 USAGE_PROBE = r'''python3 -c "
 import json,os,time,calendar
-cut=time.time()-8*86400
+cut=time.time()-31*86400
+seen=set()
 root=os.path.expanduser(chr(126)+'/.claude/projects')
 files=[]
 for base,dirs,names in os.walk(root):
@@ -494,13 +501,18 @@ for f in files:
             m=d.get('message') or {}
             u=m.get('usage') or {}
             if not u: continue
+            if m.get('id'):
+                k=(m.get('id'),d.get('requestId'))
+                if k in seen: continue
+                seen.add(k)
             ts=d.get('timestamp') or ''
             try: ep=calendar.timegm(time.strptime(ts[:19],'%Y-%m-%dT%H:%M:%S'))
             except Exception: continue
             print(chr(9).join([str(ep),str(m.get('model') or ''),
                 str(u.get('input_tokens') or 0),str(u.get('output_tokens') or 0),
                 str(u.get('cache_creation_input_tokens') or 0),
-                str(u.get('cache_read_input_tokens') or 0)]))
+                str(u.get('cache_read_input_tokens') or 0),
+                str((u.get('cache_creation') or {}).get('ephemeral_1h_input_tokens') or 0)]))
     except Exception: continue"'''
 
 
@@ -510,24 +522,31 @@ def spend(label, refresh=True):
     With refresh off, whatever the keeper last wrote is used and no scan runs.
     The panel is rendered inside fzf's transform-header, which holds the
     keyboard until it returns, so it must never be the thing that fetches.
+    With refresh None, any saved copy will do and only a missing one is
+    fetched: a month of transcripts takes seconds to scan, too long to hold
+    a window closed for.
     """
-    cache = os.path.join(tempfile.gettempdir(), f"csessions-spend-{label}.json")
+    cache = os.path.join(tempfile.gettempdir(), f"csessions-spend-v2-{label}.json")
     try:
-        if refresh is False or time.time() - os.path.getmtime(cache) < USAGE_TTL:
+        if refresh is not True or time.time() - os.path.getmtime(cache) < USAGE_TTL:
             with open(cache) as f:
                 return json.load(f)
     except Exception:
-        if not refresh:
+        if refresh is False:
             return {}
     days = {}
     try:
         for l in run(label, USAGE_PROBE, timeout=90).splitlines():
             p = l.split("\t")
-            if len(p) != 6 or not p[0]:
+            if len(p) != 7 or not p[0]:
                 continue
-            inp, out, cw, cr = (int(x or 0) for x in p[2:])
-            price = next((v for k, v in PRICES.items() if k in p[1]), DEFAULT_PRICE)
-            usd = (inp * price[0] + out * price[1] + cw * price[2] + cr * price[3]) / 1e6
+            inp, out, cw, cr, cw1h = (int(x or 0) for x in p[2:])
+            # longest key wins, or "opus-5" would price claude-opus-5-5
+            key = max((k for k in PRICES if k in p[1]), key=len, default=None)
+            price = PRICES[key] if key else DEFAULT_PRICE
+            # an hour-long cache write costs twice the input rate, five minutes 1.25x
+            usd = (inp * price[0] + out * price[1] + (cw - cw1h) * price[2]
+                   + cw1h * 2 * price[0] + cr * price[3]) / 1e6
             day = time.strftime("%Y-%m-%d", time.localtime(int(p[0])))
             d = days.setdefault(day, [0, 0.0])
             d[0] += inp + out + cw + cr
@@ -558,9 +577,10 @@ def stats_rows(refresh=True):
                 d[0] += v[0]
                 d[1] += v[1]
     today = time.strftime("%Y-%m-%d")
-    week = [time.strftime("%Y-%m-%d", time.localtime(time.time() - i * 86400)) for i in range(7)]
+    days_back = lambda n: [time.strftime("%Y-%m-%d", time.localtime(time.time() - i * 86400))
+                           for i in range(n)]
     rows = []
-    for tag, keys in (("today", [today]), ("7 days", week)):
+    for tag, keys in (("today", [today]), ("7 days", days_back(7)), ("30 days", days_back(30))):
         tok = sum(days.get(k, [0, 0])[0] for k in keys)
         usd = sum(days.get(k, [0, 0.0])[1] for k in keys)
         plain = f"{tag:<7} {human(tok):>7} tok   ~${usd:,.0f}"
@@ -811,16 +831,21 @@ def keeper(flags, parent):
     Fetching costs seconds against every host, so it happens here rather than
     in anything the terminal is waiting on.
     """
+    def usage():
+        # a month of transcripts takes seconds; the list must not wait for it
+        while True:
+            for h in HOSTS:
+                spend(h)
+                if HOSTS[h] is not None:
+                    fetch_limits(h)
+            time.sleep(REFRESH)
+    threading.Thread(target=usage, daemon=True).start()
     while True:
         try:
             os.kill(parent, 0)
         except OSError:
             return                     # the picker is gone
         try:
-            for h in HOSTS:
-                spend(h)
-                if HOSTS[h] is not None:
-                    fetch_limits(h)
             rows = collect(flags)
             tmp = f"{SNAP}.{os.getpid()}"
             with open(tmp, "w") as f:  # write then rename, so a reader never
@@ -940,7 +965,7 @@ def head_block(rows, refresh=True):
 def picker(args, flags):
     """Draw the list once. Returns True to draw it again, False to quit."""
     rows = collect("--json --all" if flags else "--json")
-    head = head_block(rows)
+    head = head_block(rows, refresh=None)
 
     lines = rows_to_lines(rows)
     if "-l" in args or not sys.stdout.isatty():

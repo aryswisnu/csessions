@@ -57,7 +57,7 @@ yesterday ───────────────────────�
   recovers it from its transcript, with the title Claude gave it.
 - **A conversation preview**, with the harness noise (skill bodies, command
   preambles, system reminders) filtered out.
-- **Token usage and cost** for today and the last 7 days, priced per model.
+- **Token usage and cost** for today, the last 7 days and the last 30 days, priced per model.
 
 ## Install
 
