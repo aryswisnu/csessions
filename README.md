@@ -2,10 +2,9 @@
 
 See every Claude Code session on every machine you use, from the terminal.
 
-![csessions in use](demo/csessions-browse.gif)
+![Browsing sessions across two machines](demo/csessions-browse.gif)
 
-*Browsing sessions across two machines. A [second clip](demo/csessions-new.gif)
-shows starting a new session.*
+![Starting a new session](demo/csessions-new.gif)
 
 Claude Code already aggregates your sessions across machines in the desktop app,
 claude.ai and the phone. The CLI never got that view: `claude agents --json` only
