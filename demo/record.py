@@ -52,9 +52,9 @@ NEW = [
 ]
 
 # (name, argv, script, cols, rows). Terminal size is a framing decision: the
-# video is watched on a phone, so a tighter terminal means bigger type before
-# the camera does anything. The new-session pickers are a handful of lines and
-# get a short one for the same reason.
+# demo is watched on a phone, so a tighter terminal means bigger type. The
+# new-session pickers are a handful of lines and get a short one for the same
+# reason.
 SCENES = [
     ("browse", ["-a"], BROWSE, 132, 32),
     ("new", ["--new"], NEW, 104, 12),

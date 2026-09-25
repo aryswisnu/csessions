@@ -42,7 +42,6 @@ a contributor changing the UI can re-record without exposing their own work.
 | `fixture.py` | builds `.fixture/`: two fake homes, stub `claude` and `ssh`, a config |
 | `record.py` | drives csessions in a pty, writes a cast per scene, renders the GIFs |
 | `csessions-*.cast` | the raw [asciicasts](https://docs.asciinema.org); re-render without recording |
-| `video/` | the HyperFrames composition that turns the scenes into `csessions.mp4` |
 
 `.fixture/` is gitignored and disposable. It is rebuilt on every recording,
 because the list shows ages relative to now.
@@ -54,60 +53,12 @@ agg --font-size 16 --fps-cap 12 --theme asciinema \
   demo/csessions-browse.cast demo/csessions-browse.gif
 ```
 
-## The video
-
-`csessions.mp4` is the two scenes cut together with camera moves, built with
-[HyperFrames](https://hyperframes.heygen.com). The GIFs are the raw captures;
-the MP4 adds the framing.
-
-```sh
-cd demo/video
-npx hyperframes check && npx hyperframes render
-```
-
-It expects `assets/browse.mp4` and `assets/new.mp4`, which are not committed
-because they are derived. Rebuild them from the casts at the resolution the
-camera needs:
-
-```sh
-mkdir -p demo/video/assets
-for s in browse new; do
-  agg --font-size 40 --fps-cap 12 --idle-time-limit 2 --theme asciinema \
-    demo/csessions-$s.cast /tmp/$s.gif
-  # -g 30 matters: sparse keyframes make the renderer freeze on seek
-  ffmpeg -y -i /tmp/$s.gif -c:v libx264 -r 30 -g 30 -keyint_min 30 -crf 16 \
-    -pix_fmt yuv420p -movflags +faststart demo/video/assets/$s.mp4
-done
-```
-
-Three things the camera depends on:
-
-- **Font size 40, not 16.** The composition sits between 1.3x and 1.8x the
-  whole time, so the source is rendered at roughly 2.5x the display size and
-  every move is still a downscale rather than an upscale.
-- **The pan is clamped** to the scaled picture's own overhang, so a move can
-  never push the frame off its own edge and expose the background. A target
-  near a corner is approached rather than centred.
-- **The camera never goes back to a full-frame wide shot.** At 1280x736 the
-  whole terminal is below reading size, so a "neutral" wide is just an
-  unreadable one. It moves between places worth reading and then holds still;
-  a camera that drifts continuously reads as mechanical.
-
-Camera beats are cut to each capture's frame timestamps, which are not the
-same as the keystroke times in `record.py`: `agg --idle-time-limit 2` collapses
-every pause longer than two seconds. Read the real ones with:
-
-```sh
-ffprobe -v error -select_streams v -show_entries frame=pts_time \
-  -of csv=p=0 demo/csessions-browse.gif
-```
-
 ## Editing the demo
 
 Sessions, conversations and usage totals are the tables at the top of
 `fixture.py`. Keystrokes, timings and each scene's terminal size are the tables
 at the top of `record.py`. Terminal size is a framing decision: a tighter
-terminal means bigger type before the camera does anything.
+terminal means bigger type in the GIF.
 
 Three things to keep in mind:
 
