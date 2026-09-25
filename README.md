@@ -1,5 +1,12 @@
 # csessions
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776ab.svg)
+![fzf 0.60+](https://img.shields.io/badge/fzf-0.60%2B-2ea44f.svg)
+![Claude Code 2.1.282](https://img.shields.io/badge/Claude%20Code-2.1.282-d97757.svg)
+![No Python dependencies](https://img.shields.io/badge/python%20deps-none-brightgreen.svg)
+
 See every Claude Code session on every machine you use, from the terminal.
 
 ![Browsing sessions across two machines](demo/csessions-browse.gif)
@@ -63,9 +70,27 @@ Requires Python 3.9+, [fzf](https://github.com/junegunn/fzf) 0.60+, and Claude
 Code. Remote hosts need Claude Code and key-based SSH.
 
 ```sh
-git clone https://github.com/<you>/csessions.git
+git clone https://github.com/aryswisnu/csessions.git
 install -m 755 csessions/csessions ~/.local/bin/csessions
 ```
+
+### Dock app (macOS, optional)
+
+To open csessions from the Dock in its own iTerm window, build the app:
+
+```sh
+csessions/extras/build-app.sh
+```
+
+This creates `~/Applications/Claude Sessions.app`. Drag it to the Dock. The
+first time you open it, macOS asks for permission to control iTerm. Pass a
+folder to build it somewhere else: `extras/build-app.sh /Applications`.
+
+The app is built on your Mac and not downloaded, for two reasons. macOS blocks
+an unsigned app that comes from the internet. It also ties the permission to
+control iTerm to the app's signature, so an app you sign yourself gets a
+permission prompt that works. See [extras/README.md](extras/README.md) for what
+the script does.
 
 ## Configure
 
@@ -106,8 +131,9 @@ real titles.
 ## Optional extras
 
 In [`extras/`](extras), documented in [extras/README.md](extras/README.md):
-a macOS app bundle that opens the list in its own window, an icon generator,
-and a tiling hook. The tiling hook is off unless you set `tile_shortcut`.
+the Dock app builder, a tiling hook, a clipboard bridge that lets you paste
+screenshots into remote sessions, and a watcher that prefixes remote session
+titles. None of them is on unless you set it up.
 
 ## How it works, and what that costs you
 
@@ -118,7 +144,7 @@ csessions reads files Claude Code does not document:
 - `claude agents --json` for the daemon's own view
 
 **Expect this to break when Claude Code changes.** Verified against
-**2.1.276**. If a release moves any of the above, csessions degrades to showing
+**2.1.282**. If a release moves any of the above, csessions degrades to showing
 less rather than crashing, but it will need fixing.
 
 It only reads. Nothing in the core writes to Claude Code's files.

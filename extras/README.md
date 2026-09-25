@@ -4,40 +4,33 @@ Optional pieces. None are needed to use `csessions`, and none are installed for
 you. Unlike the main script, two of these **write** outside their own files, so
 read the warnings.
 
-## launcher.applescript
+## build-app.sh
 
-Opens `csessions -a` in its own terminal window, sized to half the screen, so it
-can live in the macOS Dock as an app.
-
-```sh
-osacompile -o ~/Applications/"Claude Sessions.app" launcher.applescript
-```
-
-macOS ties Automation permission to an app's code signature, and `osacompile`
-signs the bundle. If you change anything inside it afterwards, re-sign it or the
-app loses permission to talk to your terminal:
+Builds `Claude Sessions.app`, a Dock app that opens `csessions -a` in its own
+iTerm window, sized to half the screen.
 
 ```sh
-codesign --force --deep --sign - ~/Applications/"Claude Sessions.app"
+extras/build-app.sh              # into ~/Applications
+extras/build-app.sh /some/dir    # somewhere else
 ```
 
-## icon.py
+It needs iTerm, and `csessions` on your login shell's `PATH`, because the app
+starts it from a login shell. It warns when either is missing. The icon needs
+Pillow (`pip3 install pillow`). Without Pillow, the app keeps the default icon.
 
-Draws an icon for that app bundle. Needs Pillow.
+The script runs four steps, in this order:
 
-```sh
-python3 icon.py sessions.icns
-cp sessions.icns ~/Applications/"Claude Sessions.app/Contents/Resources/applet.icns"
-```
+1. `osacompile` compiles `launcher.applescript` into the app.
+2. `icon.py` draws the icon into `applet.icns`. The script also deletes the
+   asset catalogue that `osacompile` writes, because that catalogue outranks
+   `applet.icns`.
+3. It sets the bundle id to `local.csessions.app`.
+4. `codesign` signs the app.
 
-`osacompile` also writes an asset catalogue that outranks `applet.icns`. Delete
-it and the key that points at it, then re-sign:
-
-```sh
-APP=~/Applications/"Claude Sessions.app"
-rm -f "$APP/Contents/Resources/Assets.car"
-/usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$APP/Contents/Info.plist"
-```
+The order matters. macOS ties the app's permission to control iTerm to its
+signature. A change after signing, such as a new icon, breaks the signature,
+and the app then fails with `Not authorised to send Apple events` (-1743).
+Signing last prevents this. If you edit the app by hand, run the script again.
 
 ## Window tiling
 
